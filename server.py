@@ -9,6 +9,9 @@ from engine import Engine, SYMBOLS
 from terminal import BinanceReadOnly, observations, WATCH_SYMBOLS, validate_history
 from scanner import Scanner
 from adaptive_runner import AdaptiveRunner
+from microstructure import MicrostructureStore
+from shadow_execution import ShadowExecution
+from public_streams import MicrostructureService
 
 ROOT=Path(__file__).parent
 lock=threading.RLock()
@@ -47,6 +50,11 @@ def candles(symbol,start,end):
     return [{'time':int(r[0]),'open':float(r[1]),'high':float(r[2]),'low':float(r[3]),'close':float(r[4]),'end':int(r[6])} for r in rows if int(r[6])<=end]
 scanner=Scanner(public_get,candles)
 adaptive=AdaptiveRunner(public_get,scanner,Path(os.environ.get('DATABASE_PATH',str(ROOT/'data/quantlab.sqlite3'))).parent)
+micro_store=MicrostructureStore(adaptive.directory/'microstructure.sqlite3')
+adaptive.candle_cache=micro_store
+shadow=ShadowExecution(micro_store,adaptive.directory/'adaptive.sqlite3',adaptive.config)
+adaptive.portfolio.telemetry=shadow.enqueue_telemetry
+microstructure=MicrostructureService(micro_store,shadow,scanner,adaptive)
 def sync():
     now=int(public_get('time')['serverTime'])
     last=now//60000*60000-60000
@@ -126,8 +134,24 @@ class Handler(SimpleHTTPRequestHandler):
         super().end_headers()
     def do_GET(self):
         path=urlparse(self.path).path
-        if path=='/api/adaptive':
+        if path=='/api/microstructure':
+            self.send_json(microstructure.snapshot())
+        elif path=='/api/shadow/report':
+            self.send_json(shadow.report())
+        elif path=='/api/adaptive':
             self.send_json(adaptive.snapshot())
+        elif path=='/api/adaptive-matrix':
+            self.send_json(adaptive.matrix.snapshot())
+        elif path=='/api/adaptive-matrix/variants':
+            self.send_json({'variants': adaptive.matrix.snapshot()['variants']})
+        elif path.startswith('/api/adaptive-matrix/variant/'):
+            variant_id=path.rsplit('/',1)[-1]
+            data=adaptive.matrix.variant_snapshot(variant_id)
+            self.send_json(data if data else {'error':'not found'},200 if data else 404)
+        elif path=='/api/adaptive-matrix/frontier':
+            self.send_json(adaptive.matrix.frontier_snapshot())
+        elif path=='/api/adaptive-matrix/stress':
+            self.send_json(adaptive.matrix.stress_snapshot())
         elif path=='/api/scanner':
             self.send_json(scanner.snapshot())
         elif path=='/api/market':
@@ -148,7 +172,7 @@ class Handler(SimpleHTTPRequestHandler):
             with lock: rows=[dict(r) for r in engine.db.execute('SELECT * FROM trades ORDER BY id')]
             out=io.StringIO(); writer=csv.DictWriter(out,fieldnames=['id','strategy','symbol','time','side','qty','price','entry','fee','pnl']); writer.writeheader(); writer.writerows(rows)
             self.send_response(200); self.send_header('Content-Type','text/csv'); self.send_header('Content-Disposition','attachment; filename="quantlab-trades.csv"'); self.end_headers(); self.wfile.write(out.getvalue().encode())
-        elif path in ('/','/index.html','/app.js','/terminal.js','/terminal.css','/scanner.js','/adaptive.js','/style.css','/manifest.json','/icon.svg'): super().do_GET()
+        elif path in ('/','/index.html','/app.js','/terminal.js','/terminal.css','/scanner.js','/adaptive.js','/microstructure.js','/style.css','/manifest.json','/icon.svg'): super().do_GET()
         else: self.send_error(404)
 if __name__=='__main__':
     logging.basicConfig(level=logging.INFO)
@@ -156,6 +180,10 @@ if __name__=='__main__':
     threading.Thread(target=watch_worker,daemon=True).start()
     threading.Thread(target=scanner.run,args=(stop,),daemon=True).start()
     threading.Thread(target=adaptive.run,args=(stop,),daemon=True).start()
+    threading.Thread(target=microstructure.run,args=(stop,),daemon=True).start()
     server=ThreadingHTTPServer(('0.0.0.0',int(os.environ.get('PORT','8000'))),Handler)
     try: server.serve_forever()
-    finally: stop.set(); server.server_close()
+    finally:
+        stop.set()
+        adaptive.close()
+        server.server_close()

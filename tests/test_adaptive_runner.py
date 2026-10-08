@@ -27,7 +27,7 @@ class RunnerTests(unittest.TestCase):
                 self.assertEqual(args.args[0]['BTCUSDT'][-1]['time'],86460000)
                 self.assertEqual(runner._history.call_count,2)
                 self.assertTrue(args.kwargs['context_ok'])
-            finally:runner.portfolio.db.close()
+            finally:runner.close()
 
     def test_live_env_does_not_activate_adapter(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -37,4 +37,4 @@ class RunnerTests(unittest.TestCase):
                     runner.run(threading.Event())
                 self.assertEqual(runner.status['state'],'blocked')
                 runner.get.assert_not_called()
-            finally:runner.portfolio.db.close()
+            finally:runner.close()

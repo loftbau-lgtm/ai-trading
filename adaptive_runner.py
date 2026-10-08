@@ -7,6 +7,7 @@ import threading
 import time
 from adaptive import NAME, load_config, rank_universe, validate_bars, window_metrics
 from adaptive_portfolio import PaperPortfolio
+from adaptive_matrix import AdaptiveMatrix
 
 
 class AdaptiveRunner:
@@ -15,14 +16,26 @@ class AdaptiveRunner:
         self.directory = Path(directory)
         self.config = load_config()
         self.portfolio = PaperPortfolio(self.directory/'adaptive.sqlite3',self.config)
+        self.matrix = AdaptiveMatrix(self.directory,self.config)
         self.lock = threading.Lock()
         self.status = dict(state='starting',processed=0,total=0,error=None,updatedAt=None)
         self.ranking = []
+        self.candle_cache = None  # Optional public WebSocket cache; REST repairs gaps.
 
     def _history(self,symbol,last,now):
         existing = self.portfolio.history(symbol)
         start = existing[-1]['time']+60000 if existing else last-1440*60000
         result = list(existing)
+        if self.candle_cache and existing:
+            cached=self.candle_cache.closed_bars(symbol,start,last)
+            prefix=[]
+            for bar in cached:
+                if bar['time']!=start+len(prefix)*60000:break
+                prefix.append(bar)
+            if prefix:
+                validate_bars(prefix,now)
+                self.portfolio.save_bars(symbol,prefix)
+                result.extend(prefix);start=prefix[-1]['time']+60000
         # Bound one cycle; long outages catch up across cycles, no skipping.
         for _ in range(10):
             if start > last: break
@@ -49,6 +62,8 @@ class AdaptiveRunner:
         now = int(self.get('time')['serverTime'])
         after = int(time.time()*1000)
         clock_ok = abs(now-(before+after)//2) <= c['MAX_CLOCK_SKEW_MS'] and after-before <= c['MAX_CLOCK_SKEW_MS']
+        if self.candle_cache:
+            with self.candle_cache.lock:self.candle_cache.clock_drift=now-(before+after)//2
         last = now//60000*60000-60000
         tickers = {r['symbol']:r for r in scan['rows'] if r['quote'] == c['QUOTE']}
         with self.portfolio.lock:
@@ -94,6 +109,9 @@ class AdaptiveRunner:
         fresh = clock_ok and not failures and ended-now <= c['MAX_DATA_AGE_MS'] and self.scanner.snapshot()['fresh']
         self.portfolio.process(histories,ranking,ended,context_ok=fresh,
                                manual_kill=(self.directory/'adaptive.kill').exists())
+        # Matrix reuses the exact same histories/ranking snapshot. No extra Binance requests.
+        self.matrix.process(histories,ranking,ended,context_ok=fresh,
+                            manual_kill=(self.directory/'adaptive.kill').exists())
         with self.lock:
             self.ranking = ranking[:c['TOP_N']]
             self.status.update(state='live' if fresh else 'paused',updatedAt=ended,ranked=len(ranking),
@@ -112,6 +130,17 @@ class AdaptiveRunner:
                 logging.warning('Adaptive public feed paused: %s',type(exc).__name__)
                 with self.lock: self.status.update(state='paused',error='Public data unavailable; no new entries')
             stop.wait(max(5,60-(time.monotonic()-started)))
+
+    def close(self):
+        # Close PAPER SQLite resources. LIVE remains untouched.
+        try:
+            self.matrix.close()
+        except Exception:
+            pass
+        try:
+            self.portfolio.db.close()
+        except Exception:
+            pass
 
     def snapshot(self):
         with self.lock: status,ranking = dict(self.status),list(self.ranking)

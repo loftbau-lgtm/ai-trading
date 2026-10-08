@@ -1,11 +1,14 @@
 import csv, io, json, logging, os, threading, time
+from collections import deque
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlencode, urlparse, parse_qs
 from urllib.request import urlopen, Request
+from urllib.error import HTTPError
 from engine import Engine, SYMBOLS
 from terminal import BinanceReadOnly, observations, WATCH_SYMBOLS, validate_history
 from scanner import Scanner
+from adaptive_runner import AdaptiveRunner
 
 ROOT=Path(__file__).parent
 lock=threading.RLock()
@@ -16,14 +19,34 @@ exchange=BinanceReadOnly()
 watch={s:{'bars':[],'state':'starting'} for s in WATCH_SYMBOLS if s not in SYMBOLS}
 # Fixed allowlist for public market data. Private reads are isolated in terminal.py.
 BASE='https://data-api.binance.vision/api/v3/'
+feed_lock=threading.Lock()
+feed_resume_at=0
+feed_weights=deque()
 def public_get(endpoint, params=None):
+    global feed_resume_at
     if endpoint not in ('time','klines','exchangeInfo','ticker/24hr'): raise ValueError('Public market data only')
+    with feed_lock:
+        if time.monotonic()<feed_resume_at: raise RuntimeError('Public API cooldown')
+        instant=time.monotonic()
+        while feed_weights and feed_weights[0][0]<=instant-60: feed_weights.popleft()
+        weight={'time':1,'klines':2,'exchangeInfo':20,'ticker/24hr':80}[endpoint]
+        if sum(w for _,w in feed_weights)+weight>2400:
+            raise RuntimeError('Public API local weight budget')
+        feed_weights.append((instant,weight))
     request=Request(BASE+endpoint+'?'+urlencode(params or {}),headers={'User-Agent':'QuantLabAI/1.0'})
-    with urlopen(request,timeout=20) as response: return json.load(response)
+    try:
+        with urlopen(request,timeout=20) as response: return json.load(response)
+    except HTTPError as exc:
+        if exc.code in (418,429):
+            try: delay=max(120,int(exc.headers.get('Retry-After','120')))
+            except ValueError: delay=120
+            with feed_lock: feed_resume_at=max(feed_resume_at,time.monotonic()+delay)
+        raise
 def candles(symbol,start,end):
     rows=public_get('klines',{'symbol':symbol,'interval':'1m','startTime':start,'endTime':end,'limit':1000})
     return [{'time':int(r[0]),'open':float(r[1]),'high':float(r[2]),'low':float(r[3]),'close':float(r[4]),'end':int(r[6])} for r in rows if int(r[6])<=end]
 scanner=Scanner(public_get,candles)
+adaptive=AdaptiveRunner(public_get,scanner,Path(os.environ.get('DATABASE_PATH',str(ROOT/'data/quantlab.sqlite3'))).parent)
 def sync():
     now=int(public_get('time')['serverTime'])
     last=now//60000*60000-60000
@@ -103,7 +126,9 @@ class Handler(SimpleHTTPRequestHandler):
         super().end_headers()
     def do_GET(self):
         path=urlparse(self.path).path
-        if path=='/api/scanner':
+        if path=='/api/adaptive':
+            self.send_json(adaptive.snapshot())
+        elif path=='/api/scanner':
             self.send_json(scanner.snapshot())
         elif path=='/api/market':
             symbol=parse_qs(urlparse(self.path).query).get('symbol',[''])[0]
@@ -123,13 +148,14 @@ class Handler(SimpleHTTPRequestHandler):
             with lock: rows=[dict(r) for r in engine.db.execute('SELECT * FROM trades ORDER BY id')]
             out=io.StringIO(); writer=csv.DictWriter(out,fieldnames=['id','strategy','symbol','time','side','qty','price','entry','fee','pnl']); writer.writeheader(); writer.writerows(rows)
             self.send_response(200); self.send_header('Content-Type','text/csv'); self.send_header('Content-Disposition','attachment; filename="quantlab-trades.csv"'); self.end_headers(); self.wfile.write(out.getvalue().encode())
-        elif path in ('/','/index.html','/app.js','/terminal.js','/terminal.css','/scanner.js','/style.css','/manifest.json','/icon.svg'): super().do_GET()
+        elif path in ('/','/index.html','/app.js','/terminal.js','/terminal.css','/scanner.js','/adaptive.js','/style.css','/manifest.json','/icon.svg'): super().do_GET()
         else: self.send_error(404)
 if __name__=='__main__':
     logging.basicConfig(level=logging.INFO)
     threading.Thread(target=worker,daemon=True).start()
     threading.Thread(target=watch_worker,daemon=True).start()
     threading.Thread(target=scanner.run,args=(stop,),daemon=True).start()
+    threading.Thread(target=adaptive.run,args=(stop,),daemon=True).start()
     server=ThreadingHTTPServer(('0.0.0.0',int(os.environ.get('PORT','8000'))),Handler)
     try: server.serve_forever()
     finally: stop.set(); server.server_close()

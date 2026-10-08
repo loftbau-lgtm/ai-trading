@@ -4,6 +4,8 @@ Market terminal and paper trading laboratory with optional protected Binance acc
 
 ## Run
 
+Additional strategy: **Activity-Filtered Adaptive Mean Reversion**, a separate 100 USDT PAPER portfolio with multi-window USDT ranking, risk controls and a decision journal. See [implementation status, configuration and explicit LIVE limitations](ADAPTIVE_STRATEGY.md). The live adapter is isolated and is not used by the web server; no real orders are enabled.
+
 Python 3.12+, no third-party packages:
 
 ```sh

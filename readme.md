@@ -1,6 +1,6 @@
 # QuantLab AI
 
-Market terminal and paper trading laboratory with optional protected Binance account viewing. **No real order submission, leverage or shorts.** Six isolated simulated 100 USDT accounts trade BTCUSDT, ETHUSDT and SOLUSDT using deterministic rules. The terminal additionally observes BNBUSDT, XRPUSDT, DOGEUSDT, ADAUSDT, AVAXUSDT, LINKUSDT, DOTUSDT and LTCUSDT. The name does not imply AI-generated trading decisions.
+Market terminal and paper trading laboratory with optional protected Binance account viewing. **No real order submission, leverage or shorts.** Six isolated simulated 100 USDT accounts trade BTCUSDT, ETHUSDT and SOLUSDT using deterministic rules. The terminal discovers all active Binance Spot markets and ranks their observed activity automatically. The name does not imply AI-generated trading decisions.
 
 ## Run
 
@@ -21,7 +21,7 @@ Keep the named `quantlab-data` volume. Never run `docker compose down -v` unless
 
 ## Terminal and optional account viewing
 
-- Terminal: 11 markets, charts of 120 closed candles, six rule-based observations per market and a hypothetical entry-cost calculator. No exchange order is submitted. Signals and estimates become unavailable for stale, incomplete or failed market data. Each additional market refreshes every 60 seconds, independently of the paper worker.
+- Terminal: all active Binance Spot pairs discovered from the public catalog, up to 120 closed candles, six rule-based observations per selected market and a hypothetical entry-cost calculator in the market's quote currency. No exchange order is submitted. Signals and estimates become unavailable for stale, incomplete or failed market data. The original 11 watchlist markets refresh in the background; other markets load on selection and refresh once a minute while the page is visible.
 - Paper laboratory: the original six accounts keep trading only BTC, ETH and SOL. Adding watchlist markets does not rewrite the experiment or its historical allocation.
 - Binance account: disconnected by default; shows spot holdings and open orders for BTC, ETH and SOL once configured. Holdings do not establish entry cost or real PnL, which are not inferred here.
 
@@ -31,11 +31,21 @@ Enter only the panel token into the account tab. Binance keys never go to the br
 
 The Binance adapter permits only GET `/api/v3/account` and GET `/api/v3/openOrders`. No order creation, cancellation, withdrawal or transfer functions exist. Real account connectivity has not been tested; automated tests use mocked responses.
 
+## Automatic market scanner
+
+`/api/scanner` discovers all `TRADING` markets where `isSpotTradingAllowed` is true (including non-USDT quotes). The catalog refreshes hourly, aggregated rolling 24-hour statistics every 60 seconds. These statistics include the current minute; they are separate from closed-candle strategy signals. Invalid, empty and stale ticker records are excluded from ranking. The UI shows the active catalog count and ranked count separately, with quote/search/trade-count/spread filters and pagination. USDT is the initial view; choose “Wszystkie” for every quote currency.
+
+The descriptive activity score is calculated **within each quote group**: 45% percentile rank of `(high-low)/open`, 35% percentile rank of quote turnover, 20% percentile rank of trade count. Ties use their average rank; a singleton group uses 50%. The result is divided by `1 + spreadPercent/0.1`, where spread is `(ask-bid)/midpoint*100`. Missing or invalid spreads get score zero and are excluded by the UI. Small quote groups can yield less meaningful ranks; the score is not a probability or forecast of profit. Default filters require at least 1,000 trades/24h and spread at most 0.3%; both are adjustable.
+
+`/api/market?symbol=ETHBTC` loads chart data only for catalog-listed pairs. A shared bounded cache (64 markets, 60-second TTL), serialized fetches and request throttling limit public API usage. New listings may lack sufficient history for signals. Scanner failures hide rankings instead of presenting old data as live; chart failures suppress that market's signals. Scanner discovery does not change the three-market paper experiment or execute trades.
+
+Public sources: [Binance market data](https://developers.binance.com/docs/binance-spot-api-docs/rest-api/market-data-endpoints) and [market-data-only API](https://developers.binance.com/docs/binance-spot-api-docs/faqs/market_data_only). No private API configuration is needed for the scanner.
+
 ## Hosting
 
 Dockerfile is ready for a Docker web service, including Render. Set `DATABASE_PATH=/data/quantlab.sqlite3`, attach a **persistent disk at `/data`**, and use one instance. Health check: `/healthz`. The application binds `0.0.0.0:$PORT` (default 8000). A persistent disk/always-on server can require a paid plan; do not deploy this SQLite version on ephemeral storage. Select a hosting workspace and approve hosting costs before provisioning. GitHub stores the source; GitHub Pages cannot run this backend.
 
-Binance public market data must be reachable from the hosting region. The public workers only call GET `time` and `klines` on `https://data-api.binance.vision/api/v3/`. Optional private reads are isolated in `terminal.py`. On network, geographic restriction or rate-limit errors the paper worker backs off to at most five minutes; the UI reports stale/error state and never fabricates data. `/healthz` indicates web-process health; `/api/state` exposes market-data status separately.
+Binance public market data must be reachable from the hosting region. The public workers only call GET `time`, `klines`, `exchangeInfo` and `ticker/24hr` on `https://data-api.binance.vision/api/v3/`. Optional private reads are isolated in `terminal.py`. On network, geographic restriction or rate-limit errors the paper worker backs off to at most five minutes; the UI reports stale/error state and never fabricates data. `/healthz` indicates web-process health; `/api/state` exposes market-data status separately.
 
 ## Execution semantics
 

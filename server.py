@@ -1,10 +1,11 @@
 import csv, io, json, logging, os, threading, time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlencode, urlparse
+from urllib.parse import urlencode, urlparse, parse_qs
 from urllib.request import urlopen, Request
 from engine import Engine, SYMBOLS
 from terminal import BinanceReadOnly, observations, WATCH_SYMBOLS, validate_history
+from scanner import Scanner
 
 ROOT=Path(__file__).parent
 lock=threading.RLock()
@@ -16,12 +17,13 @@ watch={s:{'bars':[],'state':'starting'} for s in WATCH_SYMBOLS if s not in SYMBO
 # Fixed allowlist for public market data. Private reads are isolated in terminal.py.
 BASE='https://data-api.binance.vision/api/v3/'
 def public_get(endpoint, params=None):
-    if endpoint not in ('time','klines'): raise ValueError('Public market data only')
+    if endpoint not in ('time','klines','exchangeInfo','ticker/24hr'): raise ValueError('Public market data only')
     request=Request(BASE+endpoint+'?'+urlencode(params or {}),headers={'User-Agent':'QuantLabAI/1.0'})
     with urlopen(request,timeout=20) as response: return json.load(response)
 def candles(symbol,start,end):
     rows=public_get('klines',{'symbol':symbol,'interval':'1m','startTime':start,'endTime':end,'limit':1000})
     return [{'time':int(r[0]),'open':float(r[1]),'high':float(r[2]),'low':float(r[3]),'close':float(r[4]),'end':int(r[6])} for r in rows if int(r[6])<=end]
+scanner=Scanner(public_get,candles)
 def sync():
     now=int(public_get('time')['serverTime'])
     last=now//60000*60000-60000
@@ -101,7 +103,13 @@ class Handler(SimpleHTTPRequestHandler):
         super().end_headers()
     def do_GET(self):
         path=urlparse(self.path).path
-        if path=='/api/exchange/account':
+        if path=='/api/scanner':
+            self.send_json(scanner.snapshot())
+        elif path=='/api/market':
+            symbol=parse_qs(urlparse(self.path).query).get('symbol',[''])[0]
+            data,code=scanner.market(symbol)
+            self.send_json(data,code)
+        elif path=='/api/exchange/account':
             if not exchange.authorized(self.headers.get('Authorization','')):
                 self.send_json({'state':'locked','message':'Wymagany token dostępu do panelu konta.'},401)
                 return
@@ -115,12 +123,13 @@ class Handler(SimpleHTTPRequestHandler):
             with lock: rows=[dict(r) for r in engine.db.execute('SELECT * FROM trades ORDER BY id')]
             out=io.StringIO(); writer=csv.DictWriter(out,fieldnames=['id','strategy','symbol','time','side','qty','price','entry','fee','pnl']); writer.writeheader(); writer.writerows(rows)
             self.send_response(200); self.send_header('Content-Type','text/csv'); self.send_header('Content-Disposition','attachment; filename="quantlab-trades.csv"'); self.end_headers(); self.wfile.write(out.getvalue().encode())
-        elif path in ('/','/index.html','/app.js','/terminal.js','/terminal.css','/style.css','/manifest.json','/icon.svg'): super().do_GET()
+        elif path in ('/','/index.html','/app.js','/terminal.js','/terminal.css','/scanner.js','/style.css','/manifest.json','/icon.svg'): super().do_GET()
         else: self.send_error(404)
 if __name__=='__main__':
     logging.basicConfig(level=logging.INFO)
     threading.Thread(target=worker,daemon=True).start()
     threading.Thread(target=watch_worker,daemon=True).start()
+    threading.Thread(target=scanner.run,args=(stop,),daemon=True).start()
     server=ThreadingHTTPServer(('0.0.0.0',int(os.environ.get('PORT','8000'))),Handler)
     try: server.serve_forever()
     finally: stop.set(); server.server_close()

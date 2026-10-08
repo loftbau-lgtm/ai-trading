@@ -1,6 +1,6 @@
 # QuantLab AI
 
-Public-market-data paper trading laboratory. **No real orders, exchange credentials, leverage or shorts.** Six isolated 100 USDT accounts trade BTCUSDT, ETHUSDT and SOLUSDT using deterministic rules. The name does not imply AI-generated trading decisions.
+Market terminal and paper trading laboratory with optional protected Binance account viewing. **No real order submission, leverage or shorts.** Six isolated simulated 100 USDT accounts trade BTCUSDT, ETHUSDT and SOLUSDT using deterministic rules. The terminal additionally observes BNBUSDT, XRPUSDT, DOGEUSDT, ADAUSDT, AVAXUSDT, LINKUSDT, DOTUSDT and LTCUSDT. The name does not imply AI-generated trading decisions.
 
 ## Run
 
@@ -17,13 +17,25 @@ Or use persistent Docker storage:
 docker compose up --build -d
 ```
 
-Keep the named `quantlab-data` volume. Never run `docker compose down -v` unless deliberately deleting the experiment. Production requires HTTPS through a reverse proxy or hosting provider. The public dashboard is read-only and shared: there are no user accounts, API keys, settings mutation or trade-submission endpoints.
+Keep the named `quantlab-data` volume. Never run `docker compose down -v` unless deliberately deleting the experiment. Production requires HTTPS through a reverse proxy or hosting provider. The public market and paper dashboard is shared. Private Binance balances require a separate access token; there are no settings mutation or trade-submission endpoints.
+
+## Terminal and optional account viewing
+
+- Terminal: 11 markets, charts of 120 closed candles, six rule-based observations per market and a hypothetical entry-cost calculator. No exchange order is submitted. Signals and estimates become unavailable for stale, incomplete or failed market data. Each additional market refreshes every 60 seconds, independently of the paper worker.
+- Paper laboratory: the original six accounts keep trading only BTC, ETH and SOL. Adding watchlist markets does not rewrite the experiment or its historical allocation.
+- Binance account: disconnected by default; shows spot holdings and open orders for BTC, ETH and SOL once configured. Holdings do not establish entry cost or real PnL, which are not inferred here.
+
+API configuration is deferred. When ready, set `BINANCE_API_KEY`, `BINANCE_API_SECRET` (HMAC key), and `QUANTLAB_ACCOUNT_TOKEN` in the **server process environment** and restart. Use a new Binance key restricted to reading. The panel token must be a separate randomly generated secret of at least 32 characters. The application does not load `.env` automatically. Docker users must explicitly pass environment variables to the container. Never commit credentials.
+
+Enter only the panel token into the account tab. Binance keys never go to the browser. The account endpoint uses an Authorization header, never URL parameters. Account data is cleared when switching application tabs, hiding the browser tab or choosing “Ukryj dane”; tokens are not persisted. Results are cached for 30 seconds, failures for 60 seconds. `/api/state` never includes private balances or credentials.
+
+The Binance adapter permits only GET `/api/v3/account` and GET `/api/v3/openOrders`. No order creation, cancellation, withdrawal or transfer functions exist. Real account connectivity has not been tested; automated tests use mocked responses.
 
 ## Hosting
 
 Dockerfile is ready for a Docker web service, including Render. Set `DATABASE_PATH=/data/quantlab.sqlite3`, attach a **persistent disk at `/data`**, and use one instance. Health check: `/healthz`. The application binds `0.0.0.0:$PORT` (default 8000). A persistent disk/always-on server can require a paid plan; do not deploy this SQLite version on ephemeral storage. Select a hosting workspace and approve hosting costs before provisioning. GitHub stores the source; GitHub Pages cannot run this backend.
 
-Binance public market data must be reachable from the hosting region. Only GET `time` and `klines` are called on `https://data-api.binance.vision/api/v3/`. There is no private API integration. On network, geographic restriction or rate-limit errors the worker backs off to at most five minutes; the UI reports stale/error state and never fabricates data. `/healthz` indicates web-process health; `/api/state` exposes market-data status separately.
+Binance public market data must be reachable from the hosting region. The public workers only call GET `time` and `klines` on `https://data-api.binance.vision/api/v3/`. Optional private reads are isolated in `terminal.py`. On network, geographic restriction or rate-limit errors the paper worker backs off to at most five minutes; the UI reports stale/error state and never fabricates data. `/healthz` indicates web-process health; `/api/state` exposes market-data status separately.
 
 ## Execution semantics
 
@@ -42,6 +54,7 @@ Binance public market data must be reachable from the hosting region. Only GET `
 ## API and tests
 
 Read-only: `/api/state`, `/api/trades.csv`, `/healthz`.
+Protected read-only: `/api/exchange/account` (Bearer panel token; returns 401 unless authorized).
 
 ```sh
 python -m unittest discover -s tests -v

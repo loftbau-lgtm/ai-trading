@@ -1,0 +1,10 @@
+services:
+  quantlab:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - quantlab-data:/data
+    restart: unless-stopped
+volumes:
+  quantlab-data:

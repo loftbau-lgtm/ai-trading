@@ -175,7 +175,7 @@ class Handler(SimpleHTTPRequestHandler):
             with lock: rows=[dict(r) for r in engine.db.execute('SELECT * FROM trades ORDER BY id')]
             out=io.StringIO(); writer=csv.DictWriter(out,fieldnames=['id','strategy','symbol','time','side','qty','price','entry','fee','pnl']); writer.writeheader(); writer.writerows(rows)
             self.send_response(200); self.send_header('Content-Type','text/csv'); self.send_header('Content-Disposition','attachment; filename="quantlab-trades.csv"'); self.end_headers(); self.wfile.write(out.getvalue().encode())
-        elif path in ('/','/index.html','/app.js','/terminal.js','/terminal.css','/scanner.js','/adaptive.js','/microstructure.js','/directional.js','/style.css','/manifest.json','/icon.svg'): super().do_GET()
+        elif path in ('/','/index.html','/app.js','/terminal.js','/terminal.css','/scanner.js','/adaptive.js','/adaptive_matrix.js','/microstructure.js','/directional.js','/style.css','/manifest.json','/icon.svg'): super().do_GET()
         else: self.send_error(404)
 if __name__=='__main__':
     logging.basicConfig(level=logging.INFO)

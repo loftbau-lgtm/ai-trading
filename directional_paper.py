@@ -13,6 +13,7 @@ from adaptive import correlation, validate_bars
 from directional_model import context, evaluate
 from directional_statistics import (bootstrap_robustness, concentration, cost_stress,
     expectancy, groups, monte_carlo, prediction_quality, sequence_stress, walk_forward)
+from directional_edge import diagnostic as edge_diagnostic, guard_status
 
 
 def load_config(path=None):
@@ -79,6 +80,7 @@ class DirectionalPaper:
           CREATE TABLE IF NOT EXISTS directional_state(id INTEGER PRIMARY KEY,data TEXT);
         ''')
         self.config_hash=_hash(self.c)
+        self.entry_enabled=True
         row=self.db.execute('SELECT data FROM directional_state WHERE id=1').fetchone()
         if row:
             self.state=json.loads(row['data'])
@@ -101,7 +103,25 @@ class DirectionalPaper:
         self._overflow_at=None
         self._report_cache=None
         self._last_report=None
+        with self.db:
+            pause=self._refresh_edge_guard()
+        if pause:self.status['state']=pause
         self._snapshot_locked()
+
+    def _refresh_edge_guard(self):
+        """Sticky PAPER entry pause; leaves open positions and completed trades intact."""
+        if self.state.get('edgePause'):
+            return self.state['edgePause']
+        trades=[json.loads(row[0]) for row in self.db.execute(
+            'SELECT data FROM directional_trades ORDER BY time,id')]
+        pause=guard_status(trades,self.c['minSampleForEdgeClassification'],self.c['bootstrapIterations'])
+        if pause:
+            self.state['edgePause']=pause
+            for order in self.state['orders'].values():
+                self.db.execute('UPDATE directional_orders SET status=? WHERE id=?',('EXPIRED',order['id']))
+            self.state['orders'].clear()
+            self._persist()
+        return pause
 
     def attach_stream(self,store):
         self._stream_generation=store.generation
@@ -238,6 +258,7 @@ class DirectionalPaper:
         self.db.execute('INSERT INTO directional_trades VALUES(?,?,?)',(p['id'],t,json.dumps(trade,allow_nan=False)))
         self.db.execute('UPDATE directional_positions SET status=?,data=? WHERE id=?',('CLOSED',json.dumps(dict(p,trade=trade)),p['id']))
         del self.state['positions'][symbol]
+        self._refresh_edge_guard()
         return trade
 
     def _fill_pair(self,pair_id,t,bar_by_time,manual_kill=False):
@@ -320,6 +341,8 @@ class DirectionalPaper:
 
     def _place(self,d,bars,now,pair_id=None):
         s=self.state;c=self.c;side=d['action'];symbol=d['symbol']
+        if not self.entry_enabled:return 'NO_CONFIRMED_EDGE'
+        if s.get('edgePause'):return s['edgePause']
         if side=='FLAT' or symbol in s['positions'] or symbol in s['orders']:return 'FLAT_OR_EXISTING'
         equity,dd=self._risk(d['time'])
         if s['kill']:return s['kill']
@@ -400,7 +423,7 @@ class DirectionalPaper:
         return action,None
 
     def _neutral_pairs(self,opportunities,usable,latest,context_ok,manual_kill):
-        if self.c.get('portfolioMode')!='MARKET_NEUTRAL' or not context_ok or manual_kill:
+        if self.c.get('portfolioMode')!='MARKET_NEUTRAL' or not context_ok or manual_kill or self.state.get('edgePause') or not self.entry_enabled:
             return {}
         current=[d for d in opportunities if d['time']==latest and self._mode_action(d)[0]!='FLAT']
         pairs=[]
@@ -470,12 +493,18 @@ class DirectionalPaper:
                 # cursor and positions before the next retry.
                 row=self.db.execute('SELECT data FROM directional_state WHERE id=1').fetchone()
                 if row:self.state=json.loads(row['data'])
-                self.status.update(state='paused',error='DIRECTIONAL_PROCESS_FAILED')
+                self.status.update(state=self.state.get('edgePause') or 'paused',error='DIRECTIONAL_PROCESS_FAILED')
                 raise
 
     def _process(self,histories,ranking,now,micro_store,context_ok,manual_kill):
         for bars in histories.values():validate_bars(bars,now)
         s=self.state;c=self.c
+        if not self.entry_enabled and s['orders']:
+            with self.db:
+                for order in s['orders'].values():
+                    self.db.execute('UPDATE directional_orders SET status=? WHERE id=?',('EXPIRED',order['id']))
+                s['orders'].clear()
+                self._persist()
         latest=now//60000*60000-60000
         markets={r['symbol']:r for r in ranking[:c['topMarkets']]}
         selected=set(markets)|set(s['positions'])|set(s['orders'])|{'BTCUSDT'}
@@ -530,6 +559,7 @@ class DirectionalPaper:
         opportunities=[json.loads(row['data']) for row in saved]
         opportunities.sort(key=lambda d:(d['time']!=latest,-max(d['utilityLong'],d['utilityShort']),d['symbol']))
         with self.db:
+            self._refresh_edge_guard()
             neutral=self._neutral_pairs(opportunities,usable,latest,context_ok,manual_kill)
             for d in opportunities:
                 symbol=d['symbol']
@@ -539,7 +569,12 @@ class DirectionalPaper:
                     self.db.execute('DELETE FROM directional_candidates WHERE id=?',(key,))
                     continue
                 action,mode_reason=self._mode_action(d)
-                if d['time']!=latest or not context_ok or manual_kill:
+                d['selectedAction']=action
+                if not self.entry_enabled:
+                    action='FLAT';d['rejection']='NO_CONFIRMED_EDGE'
+                elif s.get('edgePause'):
+                    action='FLAT';d['rejection']=s['edgePause']
+                elif d['time']!=latest or not context_ok or manual_kill:
                     action='FLAT';d['rejection']='STALE_CANDIDATE'
                 elif mode_reason:
                     d['rejection']=mode_reason
@@ -564,7 +599,8 @@ class DirectionalPaper:
             self.db.execute('INSERT OR REPLACE INTO directional_equity VALUES(?,?)',(latest,json.dumps(dict(time=latest,equity=equity,drawdown=dd,**exposure))))
             self._persist()
         self.opportunities=[d for d in opportunities if d['time']==latest][:30]
-        self.status=dict(state='collecting' if context_ok else 'paused',lastCycle=now,error=None if context_ok else 'STALE_OR_INCOMPLETE_MARKET',analysed=len(opportunities))
+        self.status=dict(state=s.get('edgePause') or ('SHADOW' if not self.entry_enabled else 'collecting' if context_ok else 'paused'),lastCycle=now,
+            error=None if context_ok else 'STALE_OR_INCOMPLETE_MARKET',analysed=len(opportunities))
         self._report_cache=None
 
     def _snapshot_locked(self):
@@ -625,6 +661,7 @@ class DirectionalPaper:
                     expectedCostPct=item['expectedCostPct'],evLongPct=item['evLongPct'],evShortPct=item['evShortPct'],
                     outcome60s=json.loads(outcome[0]) if outcome else None))
             report=dict(mode='PAPER_ONLY',liveReady=False,status=dict(self.status),configHash=self.config_hash,
+                edgeStatus=self.state.get('edgePause') or ('SHADOW' if not self.entry_enabled else 'ACTIVE'),
                 generation=self.c['generation'],capital=self.c['startingCapital'],cash=self.state['cash'],
                 equity=equity,netPnL=equity-self.c['startingCapital'],realizedPnL=realized,unrealizedPnL=unrealized,kill=self.state['kill'],
                 exposure=exposure,positions=copy.deepcopy(self.state['positions']),orders=copy.deepcopy(self.state['orders']),
@@ -646,6 +683,30 @@ class DirectionalPaper:
             self._report_cache=(time.monotonic(),report)
             self._last_report=report
             return report
+
+    def edge_health(self):
+        """Read-only report: no model promotion, ledger writes, or state changes."""
+        with self.lock:
+            trades=[json.loads(row[0]) for row in self.db.execute(
+                'SELECT data FROM directional_trades ORDER BY time,id')]
+            decisions={row['id']:json.loads(row['data']) for row in self.db.execute('''
+                SELECT d.id,d.data FROM directional_decisions d
+                JOIN directional_trades t ON t.id=d.id''')}
+            labels={(row['id'],row['horizon']):json.loads(row['data']) for row in self.db.execute('''
+                SELECT l.id,l.horizon,l.data FROM directional_labels l
+                JOIN directional_trades t ON t.id=l.id''')}
+            order_rows=[(row['status'],json.loads(row['data'])) for row in self.db.execute(
+                'SELECT status,data FROM directional_orders')]
+            filled=[data for status,data in order_rows if status=='FILLED']
+            decision_ids=[row[0] for row in self.db.execute('SELECT id FROM directional_decisions')]
+            return edge_diagnostic(trades,decisions,labels,orders=len(order_rows),fills=len(filled),
+                filled_long=sum(row['side']=='LONG' for row in filled),
+                filled_short=sum(row['side']=='SHORT' for row in filled),
+                open_positions=len(self.state['positions']),pending_orders=len(self.state['orders']),
+                decision_ids=decision_ids,
+                minimum=self.c['minSampleForEdgeClassification'],iterations=self.c['bootstrapIterations'],
+                paused=self.state.get('edgePause') or ('SHADOW' if not self.entry_enabled else None),
+                starting_capital=self.c['startingCapital'])
 
     def snapshot(self):
         if not self.lock.acquire(blocking=False):

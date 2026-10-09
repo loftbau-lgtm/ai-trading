@@ -215,7 +215,7 @@ class AdaptiveMatrix:
             d["portfolio"] = PaperPortfolio(self.root/f"{d['variantId']}.sqlite3", d["config"])
             self.variants[d["variantId"]] = d
 
-    def process(self, histories, ranking, now, context_ok=True, manual_kill=False):
+    def process(self, histories, ranking, now, context_ok=True, manual_kill=False, entry_enabled=True):
         if not self.cfg.get("ENABLED", True):
             return
         start = time.perf_counter()
@@ -229,7 +229,8 @@ class AdaptiveMatrix:
             for i, row in enumerate(r):
                 row["top"] = i < int(d["config"]["TOP_N"])
             t0 = time.perf_counter()
-            d["portfolio"].process(histories, r, now, context_ok=context_ok, manual_kill=manual_kill)
+            d["portfolio"].process(histories, r, now, context_ok=context_ok,
+                manual_kill=manual_kill, entry_enabled=entry_enabled)
             variant_ms += (time.perf_counter()-t0)*1000
             processed += 1
         self.last_cycle = {

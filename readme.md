@@ -1,6 +1,6 @@
 # QuantLab AI
 
-Market terminal and paper trading laboratory with optional protected Binance account viewing. **No real order submission or leverage.** Six isolated simulated 100 USDT accounts trade BTCUSDT, ETHUSDT and SOLUSDT using deterministic rules. A separate directional experiment can simulate LONG and synthetic SHORT PAPER positions. The terminal discovers all active Binance Spot markets and ranks their observed activity automatically. The name does not imply AI-generated trading decisions.
+Market terminal and paper trading laboratory with optional protected Binance account viewing. **No real order submission or leverage.** Six isolated historical 100 USDT strategy accounts are now candidate controls: new entries are paused until independent out-of-sample evidence confirms positive net edge. A separate directional experiment can simulate LONG and synthetic SHORT PAPER positions. The terminal discovers all active Binance Spot markets and ranks their observed activity automatically. An isolated autonomous PAPER operator evaluates six signal families, but currently stays flat because no family has passed promotion.
 
 ## Run
 
@@ -9,6 +9,18 @@ Additional strategy: **Activity-Filtered Adaptive Mean Reversion**, a separate 1
 The optional [microstructure and shadow execution layer](MICROSTRUCTURE.md) observes public book/trade streams and diagnoses execution quality in a separate SQLite database. Its filters do not alter the existing PAPER experiment or historical PnL. WebSocket closed candles now feed the cache; REST is used for bootstrap and gap repair.
 
 The [Directional Adaptive PAPER experiment](DIRECTIONAL.md) has its own 100 USDT ledger, closed-candle directional model, synthetic short accounting and statistical reporting. It does not touch existing portfolio balances. The new read-only endpoint is `/api/directional`.
+
+### Autonomous PAPER portfolio agent
+
+`/api/portfolio-agent` exposes a separate, persistent 100 USDT PAPER ledger. The local operator evaluates L1/L2 long, S1/S2 short and N1/N2 neutral signal families on closed candles; one economic position per symbol, next-candle simulated fills, risk/exposure vetoes and hard protective stops are enforced. Decisions and positions survive restarts. No manual trade approval exists, and no exchange-order function is imported. Existing six accounts, Adaptive, Matrix and Directional history are not reset.
+
+The external JSON agent is optional: configure `AGENT_PROVIDER=EXTERNAL`, `AGENT_MODEL`, `AGENT_API_URL` (HTTPS only), `AGENT_API_KEY`, `AGENT_TIMEOUT`, `AGENT_VERSION` and `AGENT_PROMPT_HASH` in the server environment. The key never appears in the browser or endpoint response. An unavailable/invalid external response falls back to the local operator. Changing provider/model/version/prompt hash requires a new PAPER database (`autonomous_agent.sqlite3` is never reset automatically). The model response remains subject to the hard risk veto and cannot authorize a family without validated promotion.
+
+The HTTPS endpoint receives a JSON POST with `time`, `paperOnly`, up to 50 sensor `proposals`, current `positions` and `equity`. It must return a JSON object such as `{"action":"FLAT","symbol":null,"reasonCodes":["NO_EDGE"]}`. An opening action must use `OPEN_LONG` or `OPEN_SHORT` and supply a listed `symbol`, promoted `family`, `positionSize` (fraction of equity), absolute `stop` and `target`; invalid or oversized actions are vetoed. `CLOSE` and `KEEP` require an existing position. The server never turns the response into a real exchange order.
+
+**Current limit:** no family has passed the independent walk-forward/OOS/shadow promotion gate, so the production agent cannot open new positions and reports `NO_CONFIRMED_EDGE`. The six sensor scores are uncalibrated research hypotheses, not measured probabilities or a guaranteed return. Autonomous hedging, partial reduction, counterfactual performance scoring and a configured external model are not yet operational. `LIVE` remains off.
+
+The new [Binance USDⓈ-M Futures PAPER experiment](FUTURES_PAPER.md) uses its own ledger and public Futures feed. It models separate LONG/SHORT position sides, bid/ask market fills, mark-based risk, settled funding, explicit fee/slippage costs and approximate 1x margin. Its production entry gate is also closed until independent edge validation. The older Spot-style autonomous ledger remains an isolated control; no history is migrated or reset.
 
 Python 3.12+. Public WebSocket collection uses the pinned `websockets` dependency:
 
@@ -29,7 +41,7 @@ Keep the named `quantlab-data` volume. Never run `docker compose down -v` unless
 ## Terminal and optional account viewing
 
 - Terminal: all active Binance Spot pairs discovered from the public catalog, up to 120 closed candles, six rule-based observations per selected market and a hypothetical entry-cost calculator in the market's quote currency. No exchange order is submitted. Signals and estimates become unavailable for stale, incomplete or failed market data. The original 11 watchlist markets refresh in the background; other markets load on selection and refresh once a minute while the page is visible.
-- Paper laboratory: the original six accounts keep trading only BTC, ETH and SOL. Adding watchlist markets does not rewrite the experiment or its historical allocation.
+- Paper laboratory: the original six accounts preserve BTC, ETH and SOL history but do not open new positions without confirmed edge. Adding watchlist markets does not rewrite the experiment or its historical allocation.
 - Binance account: disconnected by default; shows spot holdings and open orders for BTC, ETH and SOL once configured. Holdings do not establish entry cost or real PnL, which are not inferred here.
 
 API configuration is deferred. When ready, set `BINANCE_API_KEY`, `BINANCE_API_SECRET` (HMAC key), and `QUANTLAB_ACCOUNT_TOKEN` in the **server process environment** and restart. Use a new Binance key restricted to reading. The panel token must be a separate randomly generated secret of at least 32 characters. The application does not load `.env` automatically. Docker users must explicitly pass environment variables to the container. Never commit credentials.

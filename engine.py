@@ -37,6 +37,7 @@ def signal(name, bars):
 
 class Engine:
     def __init__(self, path):
+        self.entry_allowed = lambda strategy: True
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(path, timeout=30, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
@@ -69,6 +70,8 @@ class Engine:
                 self.db.executemany('INSERT INTO candles VALUES(?,?,?)', [(s,b['time'],json.dumps(b)) for b in histories[s]])
             self.db.execute("INSERT INTO meta VALUES('cursor',?)",(str(times[0][-1]),))
     def execute(self, strategy, symbol, side, price, timestamp):
+        if side == 'BUY' and not self.entry_allowed(strategy):
+            return
         a = self.db.execute('SELECT * FROM accounts WHERE name=?',(strategy,)).fetchone()
         p = self.db.execute('SELECT * FROM positions WHERE strategy=? AND symbol=?',(strategy,symbol)).fetchone()
         if side == 'BUY' and not p and a['cash'] > .01:

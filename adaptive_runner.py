@@ -9,6 +9,7 @@ from adaptive import NAME, load_config, rank_universe, validate_bars, window_met
 from adaptive_portfolio import PaperPortfolio
 from adaptive_matrix import AdaptiveMatrix
 from directional_paper import DirectionalPaper, load_config as load_directional_config
+from portfolio_agent import PortfolioDecisionAgent
 
 
 class AdaptiveRunner:
@@ -21,9 +22,11 @@ class AdaptiveRunner:
         directional_path=os.environ.get('DIRECTIONAL_DATABASE_PATH',str(self.directory/'directional_adaptive.sqlite3'))
         directional_config=load_directional_config(os.environ.get('DIRECTIONAL_CONFIG_PATH'))
         self.directional = DirectionalPaper(directional_path,directional_config)
+        self.agent = PortfolioDecisionAgent(self.directory/'autonomous_agent.sqlite3')
         self.lock = threading.Lock()
         self.status = dict(state='starting',processed=0,total=0,error=None,updatedAt=None)
         self.ranking = []
+        self.entry_enabled = True
         self.candle_cache = None  # Optional public WebSocket cache; REST repairs gaps.
 
     def _history(self,symbol,last,now):
@@ -124,13 +127,21 @@ class AdaptiveRunner:
                 context_ok=directional_fresh,manual_kill=(self.directional.path.parent/'directional.kill').exists())
             try:
                 self.portfolio.process(histories,ranking,ended,context_ok=fresh,
-                                       manual_kill=(self.directory/'adaptive.kill').exists())
+                                       manual_kill=(self.directory/'adaptive.kill').exists(),
+                                       entry_enabled=self.entry_enabled)
                 # Matrix reuses the exact same histories/ranking snapshot. No extra Binance requests.
                 self.matrix.process(histories,ranking,ended,context_ok=fresh,
-                                    manual_kill=(self.directory/'adaptive.kill').exists())
+                                    manual_kill=(self.directory/'adaptive.kill').exists(),
+                                    entry_enabled=self.entry_enabled)
             finally:
                 try:directional_future.result()
                 except Exception:logging.exception('Directional PAPER cycle paused')
+        # Autonomous operator has its own ledger. Existing accounts remain
+        # historical controls and cannot receive new entry capital here.
+        agent_histories={s:histories[s] for s in final_symbols if s in histories
+                         and histories[s] and histories[s][-1]['time']==decision_last}
+        try:self.agent.cycle(agent_histories,ranking,ended,fresh=fresh)
+        except Exception:logging.exception('Autonomous PAPER agent cycle paused')
         with self.lock:
             self.ranking = ranking[:c['TOP_N']]
             self.status.update(state='live' if fresh else 'paused',updatedAt=ended,ranked=len(ranking),
@@ -158,6 +169,10 @@ class AdaptiveRunner:
             pass
         try:
             self.directional.close()
+        except Exception:
+            pass
+        try:
+            self.agent.close()
         except Exception:
             pass
         try:

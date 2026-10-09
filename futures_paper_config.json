@@ -1,0 +1,19 @@
+{
+  "startingCapital": 100.0,
+  "makerFee": 0.0002,
+  "takerFee": 0.0005,
+  "slippage": 0.0002,
+  "maxSymbolExposure": 0.4,
+  "maxGrossExposure": 0.75,
+  "maxNetExposure": 0.5,
+  "maxCorrelatedExposure": 0.4,
+  "correlationThreshold": 0.7,
+  "maxPositionRisk": 0.005,
+  "maxDrawdown": 0.05,
+  "maintenanceMarginRate": 0.005,
+  "minEdgeMultiplier": 1.5,
+  "minRewardRisk": 1.5,
+  "minProbabilityNetProfit": 0.55,
+  "maxDataAgeMs": 30000,
+  "symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+}

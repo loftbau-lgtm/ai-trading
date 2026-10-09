@@ -77,7 +77,7 @@ class PaperPortfolio:
         del s['positions'][symbol]
         return trade
 
-    def process(self, histories, ranking, now, context_ok=True, manual_kill=False):
+    def process(self, histories, ranking, now, context_ok=True, manual_kill=False, entry_enabled=True):
         """Replay each missed closed candle; never backfill entries with today's ranking.
 
         Ranking is a contemporaneous snapshot ONLY for the latest closed minute.
@@ -89,7 +89,7 @@ class PaperPortfolio:
             old = copy.deepcopy(self.state)
             try:
                 with self.db:
-                    emitted=self._process(histories,ranking,now,context_ok,manual_kill)
+                    emitted=self._process(histories,ranking,now,context_ok,manual_kill,entry_enabled)
                     self.db.execute('INSERT OR REPLACE INTO portfolio VALUES(1,?)',(json.dumps(self.state,allow_nan=False),))
             except Exception:
                 self.state = old
@@ -98,7 +98,7 @@ class PaperPortfolio:
             try:self.telemetry(emitted)
             except Exception:logging.warning('Paper telemetry unavailable; committed portfolio unchanged')
 
-    def _process(self,histories,ranking,now,context_ok,manual_kill):
+    def _process(self,histories,ranking,now,context_ok,manual_kill,entry_enabled):
         emitted=[]
         s,c = self.state,self.config
         market_map = {r['symbol']:r for r in ranking}
@@ -140,7 +140,8 @@ class PaperPortfolio:
                          spread=spread,rangeToSpread=m['rangeToSpread'] if m else None,
                          expectedCost=None,expectedEdge=None,signal='HOLD',decision='HOLD',
                          positionSize=0,entry=None,exit=None,grossPnL=0,netPnL=0,**f)
-                blocked = s['kill'] or ('REJECT_MANUAL_KILL' if manual_kill else None)
+                blocked = s['kill'] or ('REJECT_MANUAL_KILL' if manual_kill else None) or (
+                    'NO_CONFIRMED_EDGE' if not entry_enabled else None)
                 pending = s['pending'].get(symbol)
                 if pending and t > pending['submitted']:
                     # Strict trade-through; not proof of a real maker fill/queue priority.

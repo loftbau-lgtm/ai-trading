@@ -1,14 +1,19 @@
 # QuantLab AI
 
-Market terminal and paper trading laboratory with optional protected Binance account viewing. **No real order submission, leverage or shorts.** Six isolated simulated 100 USDT accounts trade BTCUSDT, ETHUSDT and SOLUSDT using deterministic rules. The terminal discovers all active Binance Spot markets and ranks their observed activity automatically. The name does not imply AI-generated trading decisions.
+Market terminal and paper trading laboratory with optional protected Binance account viewing. **No real order submission or leverage.** Six isolated simulated 100 USDT accounts trade BTCUSDT, ETHUSDT and SOLUSDT using deterministic rules. A separate directional experiment can simulate LONG and synthetic SHORT PAPER positions. The terminal discovers all active Binance Spot markets and ranks their observed activity automatically. The name does not imply AI-generated trading decisions.
 
 ## Run
 
 Additional strategy: **Activity-Filtered Adaptive Mean Reversion**, a separate 100 USDT PAPER portfolio with multi-window USDT ranking, risk controls and a decision journal. See [implementation status, configuration and explicit LIVE limitations](ADAPTIVE_STRATEGY.md). The live adapter is isolated and is not used by the web server; no real orders are enabled.
 
-Python 3.12+, no third-party packages:
+The optional [microstructure and shadow execution layer](MICROSTRUCTURE.md) observes public book/trade streams and diagnoses execution quality in a separate SQLite database. Its filters do not alter the existing PAPER experiment or historical PnL. WebSocket closed candles now feed the cache; REST is used for bootstrap and gap repair.
+
+The [Directional Adaptive PAPER experiment](DIRECTIONAL.md) has its own 100 USDT ledger, closed-candle directional model, synthetic short accounting and statistical reporting. It does not touch existing portfolio balances. The new read-only endpoint is `/api/directional`.
+
+Python 3.12+. Public WebSocket collection uses the pinned `websockets` dependency:
 
 ```sh
+python -m pip install -r requirements.txt
 python server.py
 # http://localhost:8000
 ```

@@ -3,6 +3,8 @@ import copy
 import json
 import sqlite3
 import threading
+import time
+import logging
 from pathlib import Path
 from adaptive import config_hash, entry_decision, features, correlation, report, validate_bars
 
@@ -10,6 +12,7 @@ from adaptive import config_hash, entry_decision, features, correlation, report,
 class PaperPortfolio:
     def __init__(self, path, config):
         self.config = config
+        self.telemetry = None  # Optional post-commit observer; never a risk/decision hook.
         self.lock = threading.RLock()
         Path(path).parent.mkdir(parents=True,exist_ok=True)
         self.db = sqlite3.connect(path,check_same_thread=False,timeout=30)
@@ -86,13 +89,17 @@ class PaperPortfolio:
             old = copy.deepcopy(self.state)
             try:
                 with self.db:
-                    self._process(histories,ranking,now,context_ok,manual_kill)
+                    emitted=self._process(histories,ranking,now,context_ok,manual_kill)
                     self.db.execute('INSERT OR REPLACE INTO portfolio VALUES(1,?)',(json.dumps(self.state,allow_nan=False),))
             except Exception:
                 self.state = old
                 raise
+        if self.telemetry and emitted:
+            try:self.telemetry(emitted)
+            except Exception:logging.warning('Paper telemetry unavailable; committed portfolio unchanged')
 
     def _process(self,histories,ranking,now,context_ok,manual_kill):
+        emitted=[]
         s,c = self.state,self.config
         market_map = {r['symbol']:r for r in ranking}
         latest = now//60000*60000-60000
@@ -195,10 +202,14 @@ class PaperPortfolio:
                             if d['decision'].startswith('REJECT_'): d.update(signal='HOLD',positionSize=0)
                 d.update(configHash=s['configHash'],marketContext=m,sourceBar=b,executionModel='PAPER_CANDLE_PROXY')
                 self.db.execute('INSERT INTO decisions VALUES(?,?,?)',(key,t,json.dumps(d,allow_nan=False)))
+                if self.telemetry:
+                    stamp=time.time_ns()//1000000
+                    emitted.append(dict(id=key,decisionTimestamp=stamp,orderCreatedTimestamp=stamp if d['decision']=='PLACE_LIMIT_MAKER' else None))
                 s['cursors'][symbol] = t
             equity,dd = self._risk(t)
             point = dict(time=t,equity=equity,drawdown=dd)
             self.db.execute('INSERT OR REPLACE INTO equity VALUES(?,?)',(t,json.dumps(point)))
+        return emitted
 
     def snapshot(self):
         with self.lock:

@@ -8,6 +8,7 @@ import time
 from adaptive import NAME, load_config, rank_universe, validate_bars, window_metrics
 from adaptive_portfolio import PaperPortfolio
 from adaptive_matrix import AdaptiveMatrix
+from directional_paper import DirectionalPaper, load_config as load_directional_config
 
 
 class AdaptiveRunner:
@@ -17,6 +18,9 @@ class AdaptiveRunner:
         self.config = load_config()
         self.portfolio = PaperPortfolio(self.directory/'adaptive.sqlite3',self.config)
         self.matrix = AdaptiveMatrix(self.directory,self.config)
+        directional_path=os.environ.get('DIRECTIONAL_DATABASE_PATH',str(self.directory/'directional_adaptive.sqlite3'))
+        directional_config=load_directional_config(os.environ.get('DIRECTIONAL_CONFIG_PATH'))
+        self.directional = DirectionalPaper(directional_path,directional_config)
         self.lock = threading.Lock()
         self.status = dict(state='starting',processed=0,total=0,error=None,updatedAt=None)
         self.ranking = []
@@ -68,7 +72,9 @@ class AdaptiveRunner:
         tickers = {r['symbol']:r for r in scan['rows'] if r['quote'] == c['QUOTE']}
         with self.portfolio.lock:
             held = set(self.portfolio.state['positions']) | set(self.portfolio.state['pending'])
-        symbols = sorted(set(tickers)|held|{'BTCUSDT'})
+        with self.directional.lock:
+            directional_held=set(self.directional.state['positions'])|set(self.directional.state['orders'])
+        symbols = sorted(set(tickers)|held|directional_held|{'BTCUSDT'})
         histories,ranked,failures = {},[],[]
         with self.lock: self.status.update(state='syncing' if self.status['updatedAt'] else 'warming',processed=0,total=len(symbols),error=None)
         with ThreadPoolExecutor(max_workers=c['FETCH_WORKERS']) as pool:
@@ -95,7 +101,7 @@ class AdaptiveRunner:
         # eligible/held markets to the current closed minute before evaluation.
         decision_now = int(self.get('time')['serverTime'])
         decision_last = decision_now//60000*60000-60000
-        final_symbols = {r['symbol'] for r in ranking[:c['TOP_N']]}|held|{'BTCUSDT'}
+        final_symbols = {r['symbol'] for r in ranking[:c['TOP_N']]}|held|directional_held|{'BTCUSDT'}
         with ThreadPoolExecutor(max_workers=c['FETCH_WORKERS']) as pool:
             futures = {pool.submit(self._history,s,decision_last,decision_now):s for s in sorted(final_symbols)}
             for future in as_completed(futures):
@@ -107,11 +113,24 @@ class AdaptiveRunner:
                 except Exception:failures.append(symbol)
         ended = int(time.time()*1000)
         fresh = clock_ok and not failures and ended-now <= c['MAX_DATA_AGE_MS'] and self.scanner.snapshot()['fresh']
-        self.portfolio.process(histories,ranking,ended,context_ok=fresh,
-                               manual_kill=(self.directory/'adaptive.kill').exists())
-        # Matrix reuses the exact same histories/ranking snapshot. No extra Binance requests.
-        self.matrix.process(histories,ranking,ended,context_ok=fresh,
-                            manual_kill=(self.directory/'adaptive.kill').exists())
+        directional_fresh=(clock_ok and ended-now<=self.directional.c['maxDataAgeMs']
+            and self.scanner.snapshot()['fresh'] and all(
+                symbol in histories and histories[symbol] and histories[symbol][-1]['time']==decision_last
+                for symbol in final_symbols))
+        # Start the independent ledger as soon as the common market snapshot is
+        # ready. Its SQLite transaction cannot change either existing account.
+        with ThreadPoolExecutor(max_workers=1) as directional_pool:
+            directional_future=directional_pool.submit(self.directional.process,histories,ranking,ended,self.candle_cache,
+                context_ok=directional_fresh,manual_kill=(self.directional.path.parent/'directional.kill').exists())
+            try:
+                self.portfolio.process(histories,ranking,ended,context_ok=fresh,
+                                       manual_kill=(self.directory/'adaptive.kill').exists())
+                # Matrix reuses the exact same histories/ranking snapshot. No extra Binance requests.
+                self.matrix.process(histories,ranking,ended,context_ok=fresh,
+                                    manual_kill=(self.directory/'adaptive.kill').exists())
+            finally:
+                try:directional_future.result()
+                except Exception:logging.exception('Directional PAPER cycle paused')
         with self.lock:
             self.ranking = ranking[:c['TOP_N']]
             self.status.update(state='live' if fresh else 'paused',updatedAt=ended,ranked=len(ranking),
@@ -135,6 +154,10 @@ class AdaptiveRunner:
         # Close PAPER SQLite resources. LIVE remains untouched.
         try:
             self.matrix.close()
+        except Exception:
+            pass
+        try:
+            self.directional.close()
         except Exception:
             pass
         try:

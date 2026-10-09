@@ -52,6 +52,7 @@ scanner=Scanner(public_get,candles)
 adaptive=AdaptiveRunner(public_get,scanner,Path(os.environ.get('DATABASE_PATH',str(ROOT/'data/quantlab.sqlite3'))).parent)
 micro_store=MicrostructureStore(adaptive.directory/'microstructure.sqlite3')
 adaptive.candle_cache=micro_store
+adaptive.directional.attach_stream(micro_store)
 shadow=ShadowExecution(micro_store,adaptive.directory/'adaptive.sqlite3',adaptive.config)
 adaptive.portfolio.telemetry=shadow.enqueue_telemetry
 microstructure=MicrostructureService(micro_store,shadow,scanner,adaptive)
@@ -152,6 +153,8 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_json(adaptive.matrix.frontier_snapshot())
         elif path=='/api/adaptive-matrix/stress':
             self.send_json(adaptive.matrix.stress_snapshot())
+        elif path=='/api/directional':
+            self.send_json(adaptive.directional.snapshot())
         elif path=='/api/scanner':
             self.send_json(scanner.snapshot())
         elif path=='/api/market':
@@ -172,7 +175,7 @@ class Handler(SimpleHTTPRequestHandler):
             with lock: rows=[dict(r) for r in engine.db.execute('SELECT * FROM trades ORDER BY id')]
             out=io.StringIO(); writer=csv.DictWriter(out,fieldnames=['id','strategy','symbol','time','side','qty','price','entry','fee','pnl']); writer.writeheader(); writer.writerows(rows)
             self.send_response(200); self.send_header('Content-Type','text/csv'); self.send_header('Content-Disposition','attachment; filename="quantlab-trades.csv"'); self.end_headers(); self.wfile.write(out.getvalue().encode())
-        elif path in ('/','/index.html','/app.js','/terminal.js','/terminal.css','/scanner.js','/adaptive.js','/microstructure.js','/style.css','/manifest.json','/icon.svg'): super().do_GET()
+        elif path in ('/','/index.html','/app.js','/terminal.js','/terminal.css','/scanner.js','/adaptive.js','/microstructure.js','/directional.js','/style.css','/manifest.json','/icon.svg'): super().do_GET()
         else: self.send_error(404)
 if __name__=='__main__':
     logging.basicConfig(level=logging.INFO)

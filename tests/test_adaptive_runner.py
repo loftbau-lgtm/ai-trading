@@ -38,3 +38,21 @@ class RunnerTests(unittest.TestCase):
                 self.assertEqual(runner.status['state'],'blocked')
                 runner.get.assert_not_called()
             finally:runner.close()
+
+    def test_clock_skew_pauses_entries_even_with_market_data(self):
+        with tempfile.TemporaryDirectory() as directory:
+            scanner=Mock()
+            scanner.snapshot.return_value=dict(fresh=True,rows=[dict(symbol='BTCUSDT',quote='USDT',spreadPct=.02)])
+            get=Mock(side_effect=[dict(serverTime=86460001),dict(serverTime=86520001)])
+            runner=AdaptiveRunner(get,scanner,directory)
+            try:
+                runner._history=Mock(side_effect=lambda s,last,now:history(last//60000+1))
+                runner.portfolio.process=Mock()
+                runner.matrix.process=Mock()
+                runner.directional.process=Mock()
+                with patch('adaptive_runner.time.time',side_effect=[1.0,1.0,2.0]):
+                    runner.cycle(threading.Event())
+                self.assertFalse(runner.portfolio.process.call_args.kwargs['context_ok'])
+                self.assertFalse(runner.matrix.process.call_args.kwargs['context_ok'])
+                self.assertFalse(runner.status['clockOk'])
+            finally:runner.close()

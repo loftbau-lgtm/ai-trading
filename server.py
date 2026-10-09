@@ -1,10 +1,7 @@
 import csv, io, json, logging, os, threading, time
-from collections import deque
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlencode, urlparse, parse_qs
-from urllib.request import urlopen, Request
-from urllib.error import HTTPError
+from urllib.parse import urlparse, parse_qs
 from engine import Engine, SYMBOLS
 from terminal import BinanceReadOnly, observations, WATCH_SYMBOLS, validate_history
 from scanner import Scanner
@@ -12,6 +9,7 @@ from adaptive_runner import AdaptiveRunner
 from microstructure import MicrostructureStore
 from shadow_execution import ShadowExecution
 from public_streams import MicrostructureService
+from market_data import DEFAULT_HOSTS, MarketDataUnavailable, PublicMarketDataClient
 
 ROOT=Path(__file__).parent
 lock=threading.RLock()
@@ -20,31 +18,11 @@ status={'state':'starting','error':None,'lastSync':None}
 stop=threading.Event()
 exchange=BinanceReadOnly()
 watch={s:{'bars':[],'state':'starting'} for s in WATCH_SYMBOLS if s not in SYMBOLS}
-# Fixed allowlist for public market data. Private reads are isolated in terminal.py.
-BASE='https://data-api.binance.vision/api/v3/'
-feed_lock=threading.Lock()
-feed_resume_at=0
-feed_weights=deque()
+# Shared public market data client. Private reads remain isolated in terminal.py.
+market_client=PublicMarketDataClient(tuple(filter(None,
+    (host.strip() for host in os.environ.get('BINANCE_PUBLIC_HOSTS',','.join(DEFAULT_HOSTS)).split(',')))))
 def public_get(endpoint, params=None):
-    global feed_resume_at
-    if endpoint not in ('time','klines','exchangeInfo','ticker/24hr'): raise ValueError('Public market data only')
-    with feed_lock:
-        if time.monotonic()<feed_resume_at: raise RuntimeError('Public API cooldown')
-        instant=time.monotonic()
-        while feed_weights and feed_weights[0][0]<=instant-60: feed_weights.popleft()
-        weight={'time':1,'klines':2,'exchangeInfo':20,'ticker/24hr':80}[endpoint]
-        if sum(w for _,w in feed_weights)+weight>2400:
-            raise RuntimeError('Public API local weight budget')
-        feed_weights.append((instant,weight))
-    request=Request(BASE+endpoint+'?'+urlencode(params or {}),headers={'User-Agent':'QuantLabAI/1.0'})
-    try:
-        with urlopen(request,timeout=20) as response: return json.load(response)
-    except HTTPError as exc:
-        if exc.code in (418,429):
-            try: delay=max(120,int(exc.headers.get('Retry-After','120')))
-            except ValueError: delay=120
-            with feed_lock: feed_resume_at=max(feed_resume_at,time.monotonic()+delay)
-        raise
+    return market_client.get(endpoint,params)
 def candles(symbol,start,end):
     rows=public_get('klines',{'symbol':symbol,'interval':'1m','startTime':start,'endTime':end,'limit':1000})
     return [{'time':int(r[0]),'open':float(r[1]),'high':float(r[2]),'low':float(r[3]),'close':float(r[4]),'end':int(r[6])} for r in rows if int(r[6])<=end]
@@ -73,17 +51,19 @@ def sync():
         cursor=end
     with lock: status.update(state='live',error=None,lastSync=int(time.time()*1000))
 def worker():
-    delay=5
+    retry_delay=5
     while not stop.is_set():
         try:
             with lock: status['state']='syncing'
             sync()
-            delay=5
+            wait_seconds=5
+            retry_delay=5
         except Exception as exc:
             logging.exception('Market sync failed')
-            with lock: status.update(state='error',error=str(exc))
-            delay=min(delay*2,300)
-        stop.wait(delay)
+            with lock: status.update(state='MARKET_DATA_UNAVAILABLE' if isinstance(exc,MarketDataUnavailable) else 'error',error=str(exc))
+            wait_seconds=retry_delay
+            retry_delay=min(retry_delay*2,60)
+        stop.wait(wait_seconds)
 def watch_worker():
     while not stop.is_set():
         try:
@@ -137,6 +117,8 @@ class Handler(SimpleHTTPRequestHandler):
         path=urlparse(self.path).path
         if path=='/api/microstructure':
             self.send_json(microstructure.snapshot())
+        elif path=='/api/market-data/health':
+            self.send_json(market_client.snapshot())
         elif path=='/api/shadow/report':
             self.send_json(shadow.report())
         elif path=='/api/adaptive':
@@ -175,10 +157,11 @@ class Handler(SimpleHTTPRequestHandler):
             with lock: rows=[dict(r) for r in engine.db.execute('SELECT * FROM trades ORDER BY id')]
             out=io.StringIO(); writer=csv.DictWriter(out,fieldnames=['id','strategy','symbol','time','side','qty','price','entry','fee','pnl']); writer.writeheader(); writer.writerows(rows)
             self.send_response(200); self.send_header('Content-Type','text/csv'); self.send_header('Content-Disposition','attachment; filename="quantlab-trades.csv"'); self.end_headers(); self.wfile.write(out.getvalue().encode())
-        elif path in ('/','/index.html','/app.js','/terminal.js','/terminal.css','/scanner.js','/adaptive.js','/adaptive_matrix.js','/microstructure.js','/directional.js','/style.css','/manifest.json','/icon.svg'): super().do_GET()
+        elif path in ('/','/index.html','/app.js','/market_data.js','/terminal.js','/terminal.css','/scanner.js','/adaptive.js','/adaptive_matrix.js','/microstructure.js','/directional.js','/style.css','/manifest.json','/icon.svg'): super().do_GET()
         else: self.send_error(404)
 if __name__=='__main__':
     logging.basicConfig(level=logging.INFO)
+    threading.Thread(target=market_client.probe,daemon=True).start()
     threading.Thread(target=worker,daemon=True).start()
     threading.Thread(target=watch_worker,daemon=True).start()
     threading.Thread(target=scanner.run,args=(stop,),daemon=True).start()

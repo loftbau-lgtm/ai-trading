@@ -100,6 +100,8 @@ class DirectionalPaper:
         self._stream_generation=None
         self._overflow_at=None
         self._report_cache=None
+        self._last_report=None
+        self._snapshot_locked()
 
     def attach_stream(self,store):
         self._stream_generation=store.generation
@@ -565,7 +567,7 @@ class DirectionalPaper:
         self.status=dict(state='collecting' if context_ok else 'paused',lastCycle=now,error=None if context_ok else 'STALE_OR_INCOMPLETE_MARKET',analysed=len(opportunities))
         self._report_cache=None
 
-    def snapshot(self):
+    def _snapshot_locked(self):
         with self.lock:
             if self._report_cache and time.monotonic()-self._report_cache[0]<10:
                 return self._report_cache[1]
@@ -642,7 +644,16 @@ class DirectionalPaper:
                             observations60s=int(shadow[0] or 0),observed=observed,censored=int(shadow[2] or 0)),
                 config=self.c)
             self._report_cache=(time.monotonic(),report)
+            self._last_report=report
             return report
+
+    def snapshot(self):
+        if not self.lock.acquire(blocking=False):
+            stale=dict(self._last_report)
+            stale['status']=dict(stale['status'],state='processing')
+            return stale
+        try:return self._snapshot_locked()
+        finally:self.lock.release()
 
     def close(self):
         with self.lock:self.db.close()

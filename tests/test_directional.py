@@ -2,6 +2,7 @@ import copy
 import json
 import tempfile
 import threading
+import time
 import unittest
 from collections import defaultdict
 from pathlib import Path
@@ -252,6 +253,24 @@ class DirectionalTests(unittest.TestCase):
                 self.assertEqual(censored['status'],'CENSORED')
                 self.assertEqual(censored['reason'],'STREAM_INTERRUPTED_OR_RESTARTED')
             finally:paper.close()
+
+    def test_report_remains_responsive_during_long_cycle(self):
+        with tempfile.TemporaryDirectory() as folder:
+            paper=DirectionalPaper(Path(folder)/'directional.sqlite3')
+            held=threading.Event();release=threading.Event()
+            def busy():
+                with paper.lock:
+                    held.set();release.wait(3)
+            worker=threading.Thread(target=busy)
+            worker.start();self.assertTrue(held.wait(1))
+            try:
+                started=time.perf_counter()
+                report=paper.snapshot()
+                self.assertLess(time.perf_counter()-started,.5)
+                self.assertEqual(report['status']['state'],'processing')
+                self.assertEqual(report['mode'],'PAPER_ONLY')
+            finally:
+                release.set();worker.join();paper.close()
 
 
 if __name__=='__main__':unittest.main()
